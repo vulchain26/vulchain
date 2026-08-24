@@ -1,0 +1,28 @@
+# =============================================================================
+# VulChain — dependencies
+# =============================================================================
+# Required (core engine will not import without these):
+torch>=2.1
+transformers>=4.40
+accelerate>=0.30          # required by device_map="auto" model loading
+
+# Recommended (feature-complete runs; engine degrades gracefully if absent):
+peft>=0.10                # LoRA / QLoRA adapter loading
+sentence-transformers>=2.7  # S_emb embedding-similarity signal
+validators>=0.28          # authoritative URL well-formedness (insecure_url class)
+tqdm>=4.66                # progress bars
+
+# Optional quantization backends (CUDA-specific; install only if needed):
+bitsandbytes>=0.43        # 8-bit loading (BitsAndBytesConfig)
+autoawq>=0.2              # AWQ-quantized derivatives
+
+# GPTQ and compressed-tensors quantized models are handled through
+# transformers' built-in support and need no extra package here.
+#
+# Notes
+# -----
+# * bitsandbytes and autoawq require a matching CUDA toolchain. On CPU-only or
+#   incompatible setups, omit them; the loader falls back to bf16/fp16 or 8-bit
+#   only when the backend is available.
+# * sentence-transformers pulls in a MiniLM model on first use (network access
+#   required once, or pre-cache it for offline HPC nodes).
