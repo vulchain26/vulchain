@@ -545,16 +545,16 @@ vulnerability classes unless otherwise stated.
 
 | Parameter | CLI Flag | Default |
 |---|---|---:|
-| Search steps per prompt \(T\) | `--steps` | 50 |
-| Candidate mutations per step \(C\) | `--candidates` | 5 |
-| Samples per candidate \(R\) | `--samples` | 4 |
-| Per-prompt query budget $B_{\text{prompt}}$ | derived | 1,200 |
+| Search steps per prompt $(T$) | `--steps` | 50 |
+| Candidate mutations per step $(C$) | `--candidates` | 5 |
+| Samples per candidate $(R$) | `--samples` | 4 |
+| Per-prompt query budget ($B_{\text{prompt}}$) | derived | 1,200 |
 | Random seed | `--seed` | 42 |
 | Maximum generation length | `--max_tokens` | 96 |
 | Decoding temperature | `--temperature` | 0.9 |
-| Nucleus sampling \(p\) | internal | 0.95 |
-| Bandit temperature \(\tau\) | `--policy_temp` | 0.5 |
-| Minimum probability floor \(\epsilon\) | `--policy_floor` | 0.05 |
+| Nucleus sampling $(p$) | internal | 0.95 |
+| Bandit temperature $($tau$) | `--policy_temp` | 0.5 |
+| Minimum probability floor $($epsilon$) | `--policy_floor` | 0.05 |
 | Sliding reward window | internal | 50 |
 
 For each seed prompt, VulChain uses a fixed search horizon of **T = 50** steps. At every step, it evaluates **C = 5** mutated candidates together with one unmodified baseline prompt and samples **R = 4** stochastic responses for each evaluated prompt.
