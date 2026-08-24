@@ -24,6 +24,7 @@ vulchain/
 ├── README.md
 ├── requirements.txt
 ├── vulchain.py
+├── build_matched_cross_family_controls.py
 ├── seed_prompts_pkg_1000.jsonl
 ├── seed_prompts_url_1000.jsonl
 └── vulchain_all_250_anonymized.csv
@@ -33,6 +34,7 @@ vulchain/
 |---|---|
 | `vulchain.py` | Main VulChain engine, built-in vulnerability classes, model loader, single-prompt mode, and ecosystem-audit mode |
 | `requirements.txt` | Core, recommended, and optional Python dependencies |
+| `build_matched_cross_family_controls.py` | Builds the matched non-derived control model list for the Matched Cross-Family Control Analysis (paper Appendix E) |
 | `seed_prompts_pkg_1000.jsonl` | 1,000 package-hallucination search seeds |
 | `seed_prompts_url_1000.jsonl` | 1,000 insecure-URL search seeds |
 | `vulchain_all_250_anonymized.csv` | Metadata for the 250-model evaluation corpus |
@@ -1031,3 +1033,71 @@ The source of truth for supported CLI flags and runtime behavior is:
 ```text
 vulchain.py
 ```
+
+---
+
+## 22. Matched Cross-Family Control Analysis (Appendix E)
+
+`build_matched_cross_family_controls.py` reproduces the model-selection half of the paper's matched cross-family control comparison (Table 9, Eq. 9): it builds the matched, non-derived control model list against which model-level ASR on the true 250-model corpus is compared, to estimate the background rate at which comparable models exhibit each vulnerability class.
+
+This is metadata-only tooling: it queries Hugging Face Hub model metadata (`config.json`, safetensors index, model-card tags) to select and characterize control models, and never downloads or loads model weights. It sits upstream of `vulchain.py`'s existing audit mode rather than duplicating its search/scoring/detection logic — once the control list is built, `vulchain.py --model_list` handles the actual probing.
+
+### 22.1 Step 1 — Build the Matched Control List
+
+```bash
+python build_matched_cross_family_controls.py \
+  --derived_list vulchain_all_250_anonymized.csv \
+  --pool_query_limit 300 \
+  --output_dir ./matched_controls
+```
+
+For each of the 250 derived models, this fetches Hub metadata and selects the nearest eligible cross-family control under Eq. 9:
+
+```text
+c_i = argmin_{c in E(y_i)} | log P(y_i) - log P(c) |
+```
+
+where `E(y_i)` requires exact agreement on five metadata constraints — adaptation type, task specialization, instruction status, parameter-size bin, and quantization bit-width — and controls are drawn only from models outside the five study base families with no declared derivation path back to them. Matching is performed without replacement, with conflicts and residual ties resolved deterministically (see the script's module docstring for the exact rule).
+
+Outputs, written under `--output_dir`:
+
+```text
+control_candidate_pool.jsonl   raw fetched metadata for the candidate pool
+control_mapping.csv            one row per derivative: matched control, log-parameter
+                                distance, and whether the size-bin constraint was relaxed
+matched_control_list.csv       control models only, in the vulchain_all_250_anonymized.csv
+                                schema, usable directly as --model_list for vulchain.py
+unmatched_derivatives.csv      derivatives with no eligible control, even after relaxation
+```
+
+> **Methodology caveat.** The paper does not specify exact bin edges for "parameter-size bin" or a fixed vocabulary for "task specialization"/"instruction status." This script defines both precisely and deterministically (fixed parameter-count bin edges; exact tag-set membership checked against Hugging Face's structured `tags`/`pipeline_tag`/`config.json` fields, with id-text regex only as a documented fallback) — see the `PARAM_SIZE_BIN_EDGES_B`, `TASK_TAGS`, and `INSTRUCT_TAGS` definitions near the top of the script. Review these against your own methodology notes before treating a run as paper-reproducing.
+
+### 22.2 Step 2 — Audit Both Lists with `vulchain.py`
+
+Run the existing ecosystem-audit mode twice, once per list, with identical settings:
+
+```bash
+python vulchain.py --vuln package_hallucination \
+  --prompt_bank seed_prompts_pkg_1000.jsonl \
+  --model_list vulchain_all_250_anonymized.csv \
+  --output_dir ./audit/derived --live_verify --no_8bit
+
+python vulchain.py --vuln package_hallucination \
+  --prompt_bank seed_prompts_pkg_1000.jsonl \
+  --model_list ./matched_controls/matched_control_list.csv \
+  --output_dir ./audit/control --live_verify --no_8bit
+```
+
+Repeat with `--vuln insecure_url` and its corresponding prompt bank/verification flags (Section 7.2) for the insecure-URL comparison.
+
+### 22.3 Step 3 — Compute the ΔASR Table
+
+Each run's `audit_summary.json` already reports `model_level_asr` overall and per family under `by_family` (Section 15). Table 9's ΔASR per family is simply:
+
+```text
+ΔASR(family) = derived_run.by_family[family].asr − control_run.by_family[family].asr
+```
+
+computed directly from the two `audit_summary.json` files — no additional script is needed. `control_mapping.csv` (from Step 1) lets you re-map each matched control back to the base family of the derivative it stands in for, since the control list itself is written with `base_family=cross_family_control`.
+
+> **Disclosure note.** Per the paper's Open Science statement (Appendix A), the matching procedure and aggregate (family-level) metadata are appropriate for public release, but per-model vulnerability labels for individual non-derived control models should **not** be published — treat any raw per-model rows in the control-side `audit_ledger.csv` / `audit_summary.json` the same way as confirmed trigger prompts and flagged artifacts elsewhere in this README (Section 19), and share them only through controlled/coordinated-disclosure channels.
