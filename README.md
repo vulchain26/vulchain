@@ -375,7 +375,6 @@ python vulchain.py \
   --vuln package_hallucination \
   --prompt_bank seed_prompts_pkg_1000.jsonl \
   --model_list vulchain_all_250_anonymized.csv \
-  --per_model_budget 1200 \
   --output_dir ./audit/package \
   --live_verify \
   --no_8bit
@@ -390,7 +389,6 @@ python vulchain.py \
   --vuln insecure_url \
   --prompt_bank seed_prompts_url_1000.jsonl \
   --model_list vulchain_all_250_anonymized.csv \
-  --per_model_budget 1200 \
   --output_dir ./audit/url \
   --phishtank ./phishtank.csv \
   --urlhaus ./urlhaus.csv \
