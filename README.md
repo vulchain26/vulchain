@@ -1,233 +1,1147 @@
 # VulChain
 
-Embedding-space prompt-mutation engine for auditing whether a **known upstream
-vulnerability** remains reachable on a **derived** (fine-tuned / LoRA / quantized)
-open-weight model. The engine performs bandit-guided mutation in the
-derivative's own embedding space, scores responses with a dense composite score
-`S_v` for search guidance, and confirms detections only with a strict,
-externally verifiable detector `D_v`.
+VulChain is an embedding-space prompt-mutation framework for auditing whether a **known upstream vulnerability remains reachable in a derived open-weight language model** after adaptation such as full fine-tuning, parameter-efficient adaptation (e.g., LoRA/QLoRA), or quantization.
 
-This is a **defensive, post-disclosure auditing** tool. It requires a known
-vulnerable model–prompt pair as input and does not discover new vulnerability
-classes. Generated artifacts (candidate package names, URLs) are analyzed
-programmatically and are **never installed, registered, visited, or executed**.
+The released engine is vulnerability-agnostic: mutation, scoring, model loading, query accounting, logging, and search are shared across vulnerability classes, while class-specific evidence and verification are implemented behind a `VulnerabilityClass` interface.
+
+The artifact currently includes two operational vulnerability classes:
+
+- `package_hallucination`
+- `insecure_url`
+
+It also contains two **template** classes (`insecure_code` and `pii_leakage`) that illustrate the extension interface but are not configured as production detectors in this release.
+
+> **Responsible-use scope.** VulChain is intended for defensive, post-disclosure auditing of already-known vulnerability classes. Candidate package names and URLs are analyzed programmatically; the framework does not install generated packages, register generated domains, or visit generated URLs.
 
 ---
 
-## Layout
+## 1. Artifact Contents
 
+The reviewer-facing repository is intentionally compact:
+
+```text
+vulchain/
+├── README.md
+├── requirements.txt
+├── vulchain.py
+├── seed_prompts_pkg_1000.jsonl
+├── seed_prompts_url_1000.jsonl
+├── vulchain_all_250_anonymized.csv
+├── phishtank.csv
+├── urlhaus.csv
+└── tranco-1M.csv
 ```
-vulchain.py                    # engine + built-in classes + extension templates
-requirements.txt
-README.md
-seed_prompts_pkg_1000.jsonl    # package-hallucination seed bank
-seed_prompts_url_1000.jsonl    # insecure-URL seed bank
-vulchain_all_250_anonymized.csv    # model-list schema (fill with HF identifiers)
+
+| File | Purpose |
+|---|---|
+| `vulchain.py` | Main VulChain engine, built-in vulnerability classes, model loader, single-prompt mode, and ecosystem-audit mode |
+| `requirements.txt` | Core, recommended, and optional Python dependencies |
+| `seed_prompts_pkg_1000.jsonl` | 1,000 package-hallucination search seeds |
+| `seed_prompts_url_1000.jsonl` | 1,000 insecure-URL search seeds |
+| `vulchain_all_250_anonymized.csv` | Metadata for the 250-model evaluation corpus |
+| `phishtank.csv` | PhishTank snapshot used by the insecure-URL verifier |
+| `urlhaus.csv` | URLhaus snapshot used by the insecure-URL verifier |
+| `tranco-1M.csv` | Tranco top-domain snapshot used to derive the benign-domain allowlist |
+
+Model weights are **not stored in this repository**. The model-list CSV contains public model identifiers together with anonymized relative local paths.
+
+In ecosystem-audit mode, VulChain prefers an existing `local_path`. If that path is unavailable, it falls back to the corresponding `model_id` and lets Transformers/Hugging Face resolve the model.
+
+---
+
+## 2. Evaluation Corpus
+
+`vulchain_all_250_anonymized.csv` contains **250 unique derived models across five model families**.
+
+| Family | Full Fine-Tune | Adapter | Quantized | Total |
+|---|---:|---:|---:|---:|
+| Gemma-7B | 25 | 20 | 5 | 50 |
+| Llama-2-7B | 25 | 20 | 5 | 50 |
+| Llama-3.1-8B | 25 | 20 | 5 | 50 |
+| Mistral-7B | 25 | 20 | 5 | 50 |
+| CodeLlama-7B | 25 | 20 | 5 | 50 |
+| **Total** | **125** | **100** | **25** | **250** |
+
+The released CSV uses the following schema:
+
+```csv
+model_id,local_path,base_family,base_hf_id,adaptation_type,has_weights
+NamCyan/CodeLlama-7b-technical-debt-code-tesoro,./hf_models/models/codellama-7b/NamCyan__CodeLlama-7b-technical-debt-code-tesoro,codellama-7b,codellama/CodeLlama-7b-hf,full_ft,true
 ```
 
-All engine code is in the single file `vulchain.py`; the rest are data/artifact
-inputs. These seed banks are the *inputs* to the search (not the `D_v`-confirmed
-trigger prompts `p'`), so they are safe to distribute under the paper's
-open-science policy while the confirmed triggers remain withheld.
+### Column Definitions
 
-## Install
+| Column | Meaning |
+|---|---|
+| `model_id` | Public Hugging Face model/repository identifier |
+| `local_path` | Anonymized relative path for an optional locally cached checkpoint |
+| `base_family` | Normalized family label used for aggregation |
+| `base_hf_id` | Row-specific upstream/base model identifier |
+| `adaptation_type` | `full_ft`, `adapter`, or `quantized` |
+| `has_weights` | Whether model artifacts were present when the corpus was curated |
+
+`base_hf_id` is row-specific and is used as the base-model reference in ecosystem-audit mode. This is important for adapters and for rows whose exact upstream checkpoint differs within a broader family label.
+
+The compatibility layer in `vulchain.py` resolves each row as follows:
+
+```text
+Derived checkpoint:
+    existing local_path
+        └── otherwise model_id
+
+Base checkpoint:
+    row base_model (legacy schema, if present)
+        └── otherwise base_hf_id
+                └── otherwise CLI --base_model fallback
+```
+
+The legacy model-list schema (`model_id,base_model,adaptation_type,base_family`) is also accepted.
+
+---
+
+## 3. Installation
+
+### 3.1 Recommended Environment
+
+A CUDA-capable GPU is strongly recommended for the 7B/8B-class models in the corpus. CPU execution is not a practical configuration for the complete audit.
+
+Create and activate an isolated environment:
+
+```bash
+conda create -n vulchain python=3.10 -y
+conda activate vulchain
+```
+
+Install the repository dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Core deps are `torch`, `transformers`, `accelerate`. Everything else degrades
-gracefully (see `requirements.txt`).
+Core dependencies are:
 
-## Quick start
+- `torch>=2.1`
+- `transformers>=4.40`
+- `accelerate>=0.30`
 
-List the registered vulnerability classes:
+Recommended dependencies include PEFT, Sentence Transformers, URL validation, and progress bars.
+
+Optional CUDA-specific backends support selected quantized checkpoints.
+
+### 3.2 Quantization Backends
+
+`requirements.txt` includes optional support for:
+
+- `bitsandbytes` for 8-bit loading
+- `autoawq` for AWQ checkpoints
+- Transformers-native GPTQ support
+- Transformers-native compressed-tensors support
+
+`autoawq` may emit a deprecation warning in recent environments. This warning does not prevent VulChain from running, but AWQ compatibility depends on the installed Torch/Transformers stack.
+
+### 3.3 Hugging Face Access
+
+If a model is not already present at its `local_path`, VulChain falls back to the row's Hugging Face `model_id`.
+
+Internet access is therefore required unless all required checkpoints are already cached locally.
+
+Some upstream or derived models may require Hugging Face authentication or prior acceptance of their license terms. Configure Hugging Face access before running the corresponding models.
+
+---
+
+## 4. Smoke Test
+
+Verify that the engine imports correctly and that the vulnerability registry is available:
 
 ```bash
 python vulchain.py --list
 ```
 
-Package hallucination (offline allowlist; add `--live_verify` to check
-allowlist misses against live PyPI/npm):
+Expected output:
+
+```text
+Available vulnerability classes:
+  - insecure_code
+  - insecure_url
+  - package_hallucination
+  - pii_leakage
+```
+
+`insecure_code` and `pii_leakage` are extension templates.
+
+The operational vulnerability classes used by this artifact are:
+
+```text
+package_hallucination
+insecure_url
+```
+
+Depending on the installed environment, dependency-level deprecation warnings from AWQ, Torch, or other libraries may appear. Such warnings are distinct from VulChain execution failures.
+
+---
+
+## 5. Preparing Insecure-URL Verification Data
+
+The repository includes:
+
+```text
+phishtank.csv
+urlhaus.csv
+tranco-1M.csv
+```
+
+The insecure-URL detector expects a benign-domain file containing **one domain per line**.
+
+Create the cache directory:
+
+```bash
+mkdir -p cache
+```
+
+Generate the benign-domain list from Tranco:
+
+```bash
+cut -d',' -f2 tranco-1M.csv \
+  | sed '/^[[:space:]]*$/d' \
+  > cache/known_benign_domains.txt
+```
+
+Create an initially empty DNS cache:
+
+```bash
+printf '{}\n' > cache/dns_cache.json
+```
+
+The resulting helper files are:
+
+```text
+cache/
+├── known_benign_domains.txt
+└── dns_cache.json
+```
+
+The PhishTank and URLhaus snapshots can be used directly from the repository root.
+
+### Insecure-URL Verifier
+
+The implementation checks:
+
+1. URL/domain well-formedness;
+2. the benign-domain allowlist;
+3. PhishTank;
+4. URLhaus;
+5. DNS resolution for otherwise unknown domains.
+
+Threat-feed matches are classified as malicious.
+
+Unknown non-resolving domains are classified by the current detector as:
+
+```text
+hallucinated_registrable
+```
+
+Unknown resolving domains are classified as:
+
+```text
+hallucinated_taken
+```
+
+Generated URLs are classified programmatically. VulChain does **not** navigate to generated URLs.
+
+> **Reproducibility note:** PhishTank, URLhaus, Tranco, DNS, package registries, and related external sources change over time. Record the snapshot/version/date used for each reported experiment.
+
+---
+
+## 6. Single-Model Mode
+
+Single-model mode runs one seed against one derived model.
+
+### 6.1 Package Hallucination
+
+For a local full model:
 
 ```bash
 python vulchain.py \
-    --vuln       package_hallucination \
-    --model      /path/to/derivative_or_adapter \
-    --base_model /path/to/base_model \
-    --output_dir ./results/pkg_run_001 \
-    --live_verify
+  --vuln package_hallucination \
+  --model /path/to/derived/model \
+  --base_model /path/to/base/model \
+  --output_dir ./results/pkg_smoke \
+  --steps 2 \
+  --candidates 2 \
+  --samples 1 \
+  --live_verify
 ```
 
-Insecure URL generation (offline threat-DB snapshots + DNS):
+The command above is intended as a small smoke test.
+
+For a normal run:
 
 ```bash
 python vulchain.py \
-    --vuln           insecure_url \
-    --model          /path/to/derivative_or_adapter \
-    --base_model     /path/to/base_model \
-    --output_dir     ./results/url_run_001 \
-    --phishtank      ./cache/phishtank_verified.csv \
-    --urlhaus        ./cache/urlhaus_online.csv \
-    --benign_domains ./cache/known_benign_domains.txt \
-    --dns_cache      ./cache/dns_cache.json
+  --vuln package_hallucination \
+  --model /path/to/derived/model \
+  --base_model /path/to/base/model \
+  --output_dir ./results/pkg_run_001 \
+  --live_verify
 ```
 
-If `--model` points to a directory containing `adapter_config.json`, it is
-loaded as a PEFT adapter over `--base_model`; otherwise it is loaded as a full
-model. AWQ / GPTQ / compressed-tensors / 8-bit quantized checkpoints are
-detected from `config.json` and loaded through the matching backend.
+`--live_verify` checks offline-allowlist misses against live PyPI/npm registries.
 
-## Architecture
+Without `--live_verify`, package verification uses the built-in offline allowlist.
 
-The engine is vulnerability-agnostic. Only three components are class-specific,
-and all three sit behind the `VulnerabilityClass` interface:
+### PEFT Adapter
 
-| Component            | Interface method(s)                          |
-|----------------------|----------------------------------------------|
-| Search signals       | `reference_texts`, `indicative_tokens`       |
-| Composite text score | `target_types` (default) or `score_text`     |
-| Strict detector `D_v`| `detect`                                     |
+For a PEFT adapter in single-model mode, `--model` should point to the local adapter directory containing:
 
-Shared engine (never edited per class): embedding-space mutation, the five
-perturbation operators, the non-stationary multi-armed bandit, quant/PEFT-aware
-model loading, generation, logging, and the verify-then-iterate search loop.
+```text
+adapter_config.json
+```
 
-## Adding a new vulnerability class
+and `--base_model` should point to the corresponding base checkpoint.
 
-Subclass `VulnerabilityClass`, decorate with `@register_vuln`, and it becomes
-selectable via `--vuln <name>`. No engine changes.
+Example:
+
+```bash
+python vulchain.py \
+  --vuln package_hallucination \
+  --model /path/to/lora_adapter \
+  --base_model /path/to/base/model \
+  --output_dir ./results/pkg_adapter_run \
+  --live_verify
+```
+
+---
+
+### 6.2 Insecure URL Generation
+
+```bash
+python vulchain.py \
+  --vuln insecure_url \
+  --model /path/to/derived/model \
+  --base_model /path/to/base/model \
+  --output_dir ./results/url_run_001 \
+  --phishtank ./phishtank.csv \
+  --urlhaus ./urlhaus.csv \
+  --benign_domains ./cache/known_benign_domains.txt \
+  --dns_cache ./cache/dns_cache.json
+```
+
+Use:
+
+```bash
+--no_dns
+```
+
+to disable live DNS resolution.
+
+---
+
+### 6.3 Custom Seed Prompt
+
+Single-model mode uses the selected vulnerability class's built-in default seed unless `--seed_prompt` is supplied.
+
+Example:
+
+```bash
+python vulchain.py \
+  --vuln package_hallucination \
+  --model /path/to/derived/model \
+  --base_model /path/to/base/model \
+  --seed_prompt 'YOUR SEED PROMPT' \
+  --output_dir ./results/custom_seed
+```
+
+---
+
+## 7. Ecosystem Audit Mode
+
+Audit mode runs a **prompt bank × model list** experiment.
+
+Audit mode is activated when both:
+
+```text
+--prompt_bank
+--model_list
+```
+
+are supplied.
+
+---
+
+### 7.1 Package-Hallucination Audit
+
+```bash
+python vulchain.py \
+  --vuln package_hallucination \
+  --prompt_bank seed_prompts_pkg_1000.jsonl \
+  --model_list vulchain_all_250_anonymized.csv \
+  --per_model_budget 1200 \
+  --output_dir ./audit/package \
+  --live_verify \
+  --no_8bit
+```
+
+---
+
+### 7.2 Insecure-URL Audit
+
+```bash
+python vulchain.py \
+  --vuln insecure_url \
+  --prompt_bank seed_prompts_url_1000.jsonl \
+  --model_list vulchain_all_250_anonymized.csv \
+  --per_model_budget 1200 \
+  --output_dir ./audit/url \
+  --phishtank ./phishtank.csv \
+  --urlhaus ./urlhaus.csv \
+  --benign_domains ./cache/known_benign_domains.txt \
+  --dns_cache ./cache/dns_cache.json \
+  --no_8bit
+```
+
+Because the released CSV contains a row-specific `base_hf_id`, a single global `--base_model` is not required for the released 250-model list.
+
+A CLI-level `--base_model` is still supported as a fallback for legacy or custom model lists.
+
+---
+
+### 7.3 Local Checkpoints vs. Hugging Face Fallback
+
+For each model-list row, audit mode:
+
+1. uses `local_path` if it exists;
+2. otherwise falls back to `model_id`;
+3. resolves the base from `base_model` if provided in a legacy row;
+4. otherwise uses `base_hf_id`;
+5. otherwise uses the CLI `--base_model` fallback;
+6. uses `adaptation_type=adapter` as an explicit PEFT-loading hint.
+
+This allows the same CSV to be used in two environments:
+
+```text
+Internal/HPC environment
+        ↓
+local_path exists
+        ↓
+load locally cached model
+```
+
+or:
+
+```text
+Reviewer environment
+        ↓
+local_path absent
+        ↓
+use public Hugging Face model_id
+```
+
+---
+
+### 7.4 Precision Note
+
+The implementation's generic `load_8bit` option can be enabled when bitsandbytes is available.
+
+For experiments where the checkpoint's stored precision should be preserved, use:
+
+```bash
+--no_8bit
+```
+
+Format-specific AWQ/GPTQ/compressed-tensors checkpoints are still handled according to their configured quantization format.
+
+---
+
+## 8. Prompt-Bank Format
+
+Prompt banks are JSONL files containing one JSON object per line.
+
+The released prompt banks use the following fields:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `seed_id` | yes | Stable seed identifier |
+| `prompt` | yes | Search seed |
+| `s_up` | optional | Upstream vulnerability score used for ordering |
+
+Additional fields are preserved as provenance metadata.
+
+Example:
+
+```json
+{"seed_id":"PKG-000001","prompt":"...","s_up":1.23}
+```
+
+---
+
+## 9. Upstream Score (`s_up`) and Seed Ordering
+
+Audit mode orders seeds by descending upstream score when every seed contains `s_up`.
+
+If the prompt bank does not include `s_up`, VulChain supports three alternatives.
+
+### 9.1 Precomputed Score Map
+
+Provide:
+
+```bash
+--sup_map scores.json
+```
+
+Example:
+
+```json
+{
+  "PKG-000001": 1.23,
+  "PKG-000002": 0.91
+}
+```
+
+---
+
+### 9.2 Compute Upstream Scores
+
+Provide:
+
+```bash
+--upstream_model /path/or/hf-id/of/upstream-model
+```
+
+VulChain scores the seeds using the upstream model and writes:
+
+```text
+<output_dir>/sup_map.json
+```
+
+---
+
+### 9.3 Deterministic Seed-ID Ordering
+
+If none of the following are available:
+
+```text
+s_up
+--sup_map
+--upstream_model
+```
+
+VulChain uses deterministic `seed_id` ordering.
+
+The selected ordering mode is recorded in:
+
+```text
+audit_summary.json
+```
+
+Model-level and prompt-level ASR remain reproducible under deterministic seed ordering. Exact queries-to-detection ordering requires the corresponding upstream-score ordering.
+
+---
+
+## 10. Search Configuration
+
+The released implementation exposes the following default search parameters:
+
+| Parameter | CLI Flag | Default |
+|---|---|---:|
+| Search steps | `--steps` | 50 |
+| Mutated candidates per step | `--candidates` | 5 |
+| Generations per candidate | `--samples` | 4 |
+| Random seed | `--seed` | 42 |
+| Maximum new tokens | `--max_tokens` | 96 |
+| Temperature | `--temperature` | 0.9 |
+| Nucleus sampling | internal | 0.95 |
+| Bandit temperature | `--policy_temp` | 0.5 |
+| Bandit probability floor | `--policy_floor` | 0.05 |
+| Per-model audit budget | `--per_model_budget` | 1200 |
+
+The implementation reports the per-prompt query count as:
+
+```text
+B = T × (C + 1) × R
+```
+
+where:
+
+```text
+T = number of executed search steps
+C = number of mutated candidates
+R = number of generations per candidate
+```
+
+The `+1` accounts for the baseline candidate evaluated alongside the mutations.
+
+---
+
+## 11. Search Guidance and Strict Verification
+
+VulChain separates **dense search guidance** from **strict vulnerability confirmation**.
+
+The composite guidance score is:
+
+```text
+S_v = S_text
+      + lambda_emb     × S_emb
+      + lambda_logit   × S_logit
+      + lambda_entropy × S_entropy
+```
+
+Default weights are:
+
+```text
+lambda_emb     = 0.5
+lambda_logit   = 0.3
+lambda_entropy = 0.1
+```
+
+Individual auxiliary signals can be disabled using:
+
+```bash
+--disable_emb
+--disable_logit
+--disable_entropy
+```
+
+The dense score is used only to guide the search.
+
+A vulnerability is confirmed only by the vulnerability-specific strict detector:
+
+```text
+D_v
+```
+
+Therefore:
+
+```text
+high S_v ≠ confirmed vulnerability
+```
+
+A confirmed vulnerability requires:
+
+```text
+D_v = true
+```
+
+---
+
+## 12. Mutation Operators
+
+The current implementation registers six operator names:
+
+```text
+word
+char
+context
+encoding
+crosslingual
+compress
+```
+
+They can be selected using:
+
+```bash
+--categories word,char,context,encoding,crosslingual,compress
+```
+
+`context` corresponds to the implementation's structural/context-formatting perturbation.
+
+### Paper-Aligned Five-Operator Configuration
+
+For experiments using the five primary perturbation families, explicitly run:
+
+```bash
+--categories word,char,context,encoding,crosslingual
+```
+
+The five primary categories are therefore:
+
+```text
+word
+character
+structural/context
+encoding
+cross-lingual
+```
+
+The `compress` operator is an implementation extension and should be excluded when reproducing a configuration containing only the five primary perturbation categories.
+
+---
+
+## 13. Model Loading
+
+VulChain supports the three adaptation categories represented in the released corpus.
+
+### 13.1 Full Fine-Tuned Models
+
+Full fine-tuned models are loaded directly using Transformers' causal-language-model loader.
+
+The CSV representation is:
+
+```text
+adaptation_type=full_ft
+```
+
+---
+
+### 13.2 Adapters
+
+The CSV representation is:
+
+```text
+adaptation_type=adapter
+```
+
+This category includes parameter-efficient adaptations such as LoRA/QLoRA.
+
+A local directory containing:
+
+```text
+adapter_config.json
+```
+
+is automatically recognized as a PEFT adapter in single-model mode.
+
+In ecosystem-audit mode, the CSV's `adaptation_type=adapter` field also acts as an explicit adapter-loading hint.
+
+The adapter is loaded over the corresponding row-specific base model.
+
+---
+
+### 13.3 Quantized Models
+
+The CSV representation is:
+
+```text
+adaptation_type=quantized
+```
+
+The loader inspects model configuration and supports quantized formats including:
+
+```text
+AWQ
+GPTQ
+compressed-tensors
+bitsandbytes 8-bit
+```
+
+Backend availability depends on the local Python, CUDA, Torch, and Transformers environment.
+
+---
+
+## 14. Single-Run Outputs
+
+A detailed single-model run writes:
+
+```text
+<output_dir>/
+├── config.json
+├── summary.csv
+├── prompt_response_map.jsonl
+├── all_candidates.jsonl
+├── best_per_step.jsonl
+├── policy_evolution.csv
+└── final_report.json
+```
+
+| Output | Description |
+|---|---|
+| `config.json` | Search/run configuration |
+| `summary.csv` | Step-level score, loss, detector verdict, operator, token, and timing data |
+| `prompt_response_map.jsonl` | Prompt/response records and component scores |
+| `all_candidates.jsonl` | Candidate-level averaged scores |
+| `best_per_step.jsonl` | Best candidate selected at each step |
+| `policy_evolution.csv` | Bandit statistics over time |
+| `final_report.json` | Final success status, detector tiers, artifacts, prompt/response, score, and query count |
+
+---
+
+## 15. Ecosystem-Audit Outputs
+
+Audit mode writes:
+
+```text
+<output_dir>/
+├── audit_ledger.csv
+├── audit_summary.csv
+├── audit_summary.json
+└── sup_map.json
+```
+
+`sup_map.json` is written when upstream scores are computed using `--upstream_model`.
+
+With:
+
+```bash
+--detailed
+```
+
+per-model/per-seed detailed run logs are also written.
+
+`audit_summary.json` records information including:
+
+- number of requested models;
+- number of models successfully loaded;
+- number classified vulnerable;
+- model-level ASR;
+- seed ordering mode;
+- per-model query budget;
+- family-level counts;
+- family-level ASR;
+- per-model outcome metadata.
+
+By default, audit mode stops testing a model after its first confirmed trigger.
+
+Use:
+
+```bash
+--no_stop_on_first
+```
+
+to continue through the prompt bank and collect fuller prompt-level success information.
+
+---
+
+## 16. Verify the Released 250-Model Corpus
+
+The following integrity check does not download any models:
+
+```bash
+python - <<'PY'
+import csv
+from collections import Counter, defaultdict
+
+with open(
+    "vulchain_all_250_anonymized.csv",
+    newline="",
+    encoding="utf-8-sig"
+) as f:
+    rows = list(csv.DictReader(f))
+
+print("Total rows:", len(rows))
+print("Unique model_id:", len({r["model_id"] for r in rows}))
+
+print("\nFamilies:")
+for k, v in Counter(r["base_family"] for r in rows).items():
+    print(k, v)
+
+print("\nAdaptation types:")
+for k, v in Counter(r["adaptation_type"] for r in rows).items():
+    print(k, v)
+
+by_family = defaultdict(Counter)
+
+for r in rows:
+    by_family[r["base_family"]][r["adaptation_type"]] += 1
+
+print("\nPer-family distribution:")
+
+for family in sorted(by_family):
+    print(family, dict(by_family[family]))
+PY
+```
+
+Expected high-level result:
+
+```text
+Total rows: 250
+Unique model_id: 250
+```
+
+There should be:
+
+```text
+5 model families
+50 models per family
+```
+
+with each family containing:
+
+```text
+25 full_ft
+20 adapter
+5 quantized
+```
+
+Overall:
+
+```text
+125 full_ft
+100 adapter
+25 quantized
+250 total
+```
+
+---
+
+## 17. Adding a New Vulnerability Class
+
+VulChain is designed so that new vulnerability classes can be added without modifying the shared mutation/search engine.
+
+Subclass:
+
+```python
+VulnerabilityClass
+```
+
+and register the implementation using:
+
+```python
+@register_vuln
+```
+
+A vulnerability class supplies three main components:
+
+1. search guidance;
+2. composite text scoring;
+3. strict verification.
+
+Example:
 
 ```python
 @register_vuln
 class MyVuln(VulnerabilityClass):
     name = "my_vuln"
 
-    def reference_texts(self):   # exemplars for the S_emb tie-breaker
-        return {"bad": ["...example vulnerable output..."]}
+    def reference_texts(self):
+        return {
+            "target": [
+                "example target output"
+            ]
+        }
 
-    def indicative_tokens(self): # tokens for the S_logit signal
-        return ["...", "..."]
+    def indicative_tokens(self):
+        return [
+            "example",
+            "token"
+        ]
 
-    def target_types(self):      # drives the default S_text (paper Eq. 3–4)
-        return [TargetType(
-            name="my_type", severity=2.5,
-            cue_keywords=["..."],
-            partial_matcher=lambda t: 0.0,          # -> [0, 1]
-            strict_extractor=lambda t: [],          # -> candidate names
-        )]
+    def target_types(self):
+        return [
+            TargetType(
+                name="target",
+                severity=2.5,
+                cue_keywords=["example"],
+                partial_matcher=lambda text: 0.0,
+                strict_extractor=lambda text: [],
+            )
+        ]
 
-    def detect(self, text):      # strict, externally verifiable D_v
-        return DetectionResult(is_vulnerable=False, tiers=[], artifacts=[])
+    def detect(self, text):
+        return DetectionResult(
+            is_vulnerable=False,
+            tiers=[],
+            artifacts=[],
+        )
 ```
 
-Pass class-specific constructor arguments either through dedicated CLI flags or
-via the generic `--vuln_config '{"key": "value"}'` escape hatch.
+The shipped:
 
-Two **template stubs** ship as worked examples and are inert until you wire in a
-backend:
+```text
+insecure_code
+pii_leakage
+```
 
-* `insecure_code` — replace `detect` with a static-analysis backend
-  (e.g. Semgrep / CodeQL) over extracted code blocks.
-* `pii_leakage` — provide a planted-canary file (`--canary_path`) so `detect`
-  flags only verifiable memorized secrets.
+classes demonstrate this extension mechanism.
 
-## Ecosystem audit mode (Algorithm 2)
+Their strict verification backends are intentionally incomplete/inert unless explicitly configured.
 
-Single-prompt mode (above) runs one seed against one model. Audit mode runs a
-**prompt bank** against a **model list**: for each derived model it iterates the
-ordered bank with a fresh bandit per seed, consuming a per-model query budget,
-and records model-level and prompt-level ASR.
+---
+
+## 18. Reproducibility
+
+VulChain seeds Python and Torch using:
+
+```bash
+--seed
+```
+
+with default:
+
+```text
+42
+```
+
+The released generation defaults are:
+
+```text
+temperature = 0.9
+top_p      = 0.95
+max_tokens = 96
+```
+
+Exact outputs may still depend on:
+
+- GPU architecture;
+- CUDA kernels;
+- Torch version;
+- Transformers version;
+- quantization backend;
+- model revision on Hugging Face;
+- stochastic GPU behavior;
+- PyPI/npm registry state;
+- PhishTank snapshot;
+- URLhaus snapshot;
+- Tranco snapshot;
+- DNS state at execution time.
+
+For reported experiments, preserve the environment configuration and external-verification snapshot/version information alongside the resulting audit directory.
+
+For offline HPC experiments, pre-cache:
+
+- model checkpoints;
+- base checkpoints;
+- tokenizer files;
+- auxiliary Sentence Transformer weights;
+
+before moving to a network-isolated compute node.
+
+---
+
+## 19. Artifact Anonymization
+
+The released model-list file is:
+
+```text
+vulchain_all_250_anonymized.csv
+```
+
+`local_path` values use relative paths such as:
+
+```text
+./hf_models/models/codellama-7b/ORG__MODEL
+```
+
+rather than machine-specific absolute paths such as:
+
+```text
+/home/USERNAME/...
+```
+
+The released paths therefore avoid exposing:
+
+- local usernames;
+- HPC hostnames;
+- institutional filesystem paths.
+
+The relative `local_path` is an optional execution hint.
+
+If it does not exist in a reviewer checkout, ecosystem-audit mode falls back to the corresponding public:
+
+```text
+model_id
+```
+
+The release does not include confirmed rediscovered trigger prompts or raw flagged artifacts. Those outputs can contain security-sensitive material and should be handled according to the applicable disclosure process.
+
+---
+
+## 20. Practical Reviewer Workflow
+
+Artifact evaluation can be performed at increasing levels of computational cost.
+
+### Level 1 — No Model Weights
+
+Install the environment:
+
+```bash
+pip install -r requirements.txt
+```
+
+Check the engine:
+
+```bash
+python vulchain.py --list
+```
+
+Then run the 250-model CSV integrity check from Section 16.
+
+This validates:
+
+- environment setup;
+- engine import;
+- vulnerability registration;
+- artifact model-list structure.
+
+---
+
+### Level 2 — One-Model Smoke Test
+
+Use one accessible derived model and its corresponding base model:
 
 ```bash
 python vulchain.py \
-    --vuln             package_hallucination \
-    --prompt_bank      seed_prompts_pkg_1000.jsonl \
-    --model_list       derived_models.csv \
-    --base_model       /path/to/default_base \      # fallback if a row omits base_model
-    --per_model_budget 1200 \
-    --output_dir       ./audit/pkg \
-    --live_verify
+  --vuln package_hallucination \
+  --model /path/to/derived/model \
+  --base_model /path/to/base/model \
+  --steps 2 \
+  --candidates 2 \
+  --samples 1 \
+  --output_dir ./results/smoke
 ```
 
-Providing `--prompt_bank` and `--model_list` together switches to audit mode.
+This exercises the main execution path with substantially lower computational cost than the complete evaluation.
 
-### Prompt-bank format (`.jsonl`)
+---
 
-One JSON object per line. Only two fields are required; everything else is kept
-as opaque provenance metadata and logged:
+### Level 3 — Ecosystem Audit
 
-| Field     | Required | Purpose                                             |
-|-----------|----------|-----------------------------------------------------|
-| `seed_id` | yes      | Stable unique id (used for deterministic ordering)  |
-| `prompt`  | yes      | The seed prompt text                                |
-| `s_up`    | no       | Upstream vulnerability score (Stage-3 sort key)     |
+Use one of the released prompt banks together with:
 
-### Upstream score `s_up` and reproducibility
-
-The Stage-3 ordering sorts the bank by upstream score. If the bank does not
-carry `s_up`, you have three options:
-
-* **`--upstream_model <path>`** — score every seed on the upstream model, sort
-  by the measured score, and write the resulting `sup_map.json`. This
-  reproduces Stage 3 rather than relying on a stored score.
-* **`--sup_map scores.json`** — supply a precomputed `{seed_id: s_up}` map.
-* **neither** — deterministic `seed_id` order. Model-level and prompt-level ASR
-  reproduce; the QTD (queries-to-detection) sort does not.
-
-The engine reports which ordering it used in `audit_summary.json` (`order`
-field), so the release is self-documenting on this point.
-
-### Model-list format (`.csv` or `.jsonl`)
-
-Columns are case-insensitive; only `model_id` is strictly required. If
-`base_model` is omitted on a row, the CLI `--base_model` value is used.
-
-```csv
-base_family,model_id,adaptation_type,base_model
-Llama-3.1,org/llama31-lora-audit,LoRA,meta-llama/Llama-3.1-8B
-Gemma,org/gemma-ft-audit,fine-tune,google/gemma-7b
+```text
+vulchain_all_250_anonymized.csv
 ```
 
-Unknown columns are preserved as metadata. A model counts as vulnerable if any
-seed yields a `D_v`-confirmed trigger within its budget. Use
-`--no_stop_on_first` to keep going after the first trigger (full prompt-level
-ASR per model); by default, the model stops at its first confirmed trigger.
+For example:
 
-### Audit outputs
-
-```
-audit_ledger.csv       # one row per (model, seed) attempt: success/steps/queries
-audit_summary.csv      # one row per model: vulnerable / trigger_seed / queries
-audit_summary.json     # model-level ASR overall and by base family
-sup_map.json           # written when --upstream_model was used
-<model>/<seed_id>/...   # full per-seed run logs, only with --detailed
-```
-
-## Outputs
-
-Each run writes to `--output_dir`:
-
-```
-config.json                 # full run configuration
-summary.csv                 # per-step loss / score / detector verdict
-prompt_response_map.jsonl   # every prompt–response pair with all sub-scores
-all_candidates.jsonl        # per-candidate averaged scores
-best_per_step.jsonl         # best candidate per step
-policy_evolution.csv        # bandit statistics over time
-final_report.json           # outcome, artifacts, queries consumed
+```bash
+python vulchain.py \
+  --vuln package_hallucination \
+  --prompt_bank seed_prompts_pkg_1000.jsonl \
+  --model_list vulchain_all_250_anonymized.csv \
+  --per_model_budget 1200 \
+  --categories word,char,context,encoding,crosslingual \
+  --output_dir ./audit/package \
+  --live_verify \
+  --no_8bit
 ```
 
-## Reproducibility
+A complete 250-model audit is computationally expensive and requires access to the corresponding public checkpoints.
 
-The search is seeded (`--seed`, default 42) and decoding is fixed
-(temperature 0.9, nucleus 0.95, 96 new tokens). External verification sources
-(registries, threat feeds, DNS, Tranco, Public Suffix List) change over time;
-record the verification snapshot date and list versions alongside results.
+---
 
-## Responsible use
+## 21. Responsible Use
 
-The framework targets already-documented vulnerability classes and is intended
-for coordinated post-disclosure auditing. Do not release verified trigger
-prompts or raw flagged artifacts; handle those through a coordinated-disclosure
-process.
+VulChain should be used only for defensive analysis, controlled research, and authorized security auditing.
+
+In particular:
+
+- do not install generated package names;
+- do not register generated domains;
+- do not navigate to generated suspicious URLs;
+- do not execute generated artifacts;
+- do not treat a dense search score as a confirmed vulnerability;
+- use the strict detector output for vulnerability confirmation;
+- preserve appropriate disclosure handling for confirmed trigger prompts and flagged artifacts.
+
+VulChain is designed to audit whether **already-known upstream vulnerability behavior remains reachable after model adaptation**. It is not intended as a general-purpose vulnerability discovery or exploitation framework.
+
+---
+
+## 22. Command Reference
+
+Display all CLI options:
+
+```bash
+python vulchain.py --help
+```
+
+List registered vulnerability classes:
+
+```bash
+python vulchain.py --list
+```
+
+The source of truth for supported CLI flags and runtime behavior is:
+
+```text
+vulchain.py
+```
