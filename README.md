@@ -548,7 +548,7 @@ vulnerability classes unless otherwise stated.
 | Search steps per prompt \(T\) | `--steps` | 50 |
 | Candidate mutations per step \(C\) | `--candidates` | 5 |
 | Samples per candidate \(R\) | `--samples` | 4 |
-| Per-prompt query budget \(B_{\text{prompt}}\) | derived | 1,200 |
+| Per-prompt query budget $B_{\text{prompt}}$ | derived | 1,200 |
 | Random seed | `--seed` | 42 |
 | Maximum generation length | `--max_tokens` | 96 |
 | Decoding temperature | `--temperature` | 0.9 |
@@ -562,7 +562,75 @@ For each seed prompt, VulChain uses a fixed search horizon of **T = 50** steps. 
 The resulting **per-prompt forward-pass budget** is:
 
 $$
-B_{\text{prompt}} = T(C+1)R = 50 \times (5+1) \times 4 = 1{,}200.
+Analyze this entire repository before making any source-code modifications.
+
+Do not modify the implementation yet.
+
+I want you to understand the complete VulChain system, including:
+
+* `vulchain.py`
+* `VulChain_pkg.py`
+* `VulChain_url.py`
+* `deep_verify_vulchain_models.py`
+* `build_vulchain_250_selection.py`
+* seed prompt files
+* model-selection files
+* configuration
+* HPC-related scripts/documentation
+* any other files that participate in execution
+
+Trace the complete execution flow:
+
+CLI arguments
+→ configuration
+→ vulnerability selection
+→ seed prompt loading
+→ derived-model selection
+→ model loading
+→ perturbation/search algorithm
+→ candidate generation
+→ model generation
+→ vulnerability verification
+→ reward/scoring
+→ search-policy update
+→ query-budget accounting
+→ stopping conditions
+→ result aggregation
+→ output files
+
+Determine:
+
+1. The purpose of every important file.
+2. Which Python file is the authoritative/current implementation.
+3. Which files appear to be backups, legacy implementations, or utilities.
+4. The important classes and functions.
+5. How the search algorithm actually operates.
+6. How candidates and samples are counted.
+7. How query budget is calculated and enforced.
+8. How model-level and prompt-level results are calculated.
+9. How package hallucination verification works.
+10. How insecure-URL verification works.
+11. How derived models are loaded.
+12. All important CLI defaults.
+13. Any duplicated or inconsistent implementation.
+14. Potential bugs.
+15. Places where the code and documentation disagree.
+
+Do not run model inference or GPU workloads.
+
+At the end, provide:
+
+* repository architecture map
+* file-by-file explanation
+* execution-flow diagram
+* important function/class map
+* experimental-parameter table
+* query-budget explanation
+* potential implementation problems
+* recommended next steps
+
+Do not fix the problems yet. Wait for my instruction.
+ = T(C+1)R = 50 \times (5+1) \times 4 = 1{,}200.
 $$
 
 The **C + 1** term accounts for the **C** mutated candidate evaluations plus one baseline evaluation at each search step.
