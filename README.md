@@ -539,8 +539,6 @@ Model-level and prompt-level ASR remain reproducible under deterministic seed or
 
 ## 10. Search Configuration
 
-## Search Configuration
-
 The released implementation follows the hyperparameter configuration reported
 in the paper. All parameters are fixed across the evaluated derived models and
 vulnerability classes unless otherwise stated.
