@@ -26,10 +26,7 @@ vulchain/
 ├── vulchain.py
 ├── seed_prompts_pkg_1000.jsonl
 ├── seed_prompts_url_1000.jsonl
-├── vulchain_all_250_anonymized.csv
-├── phishtank.csv
-├── urlhaus.csv
-└── tranco-1M.csv
+└── vulchain_all_250_anonymized.csv
 ```
 
 | File | Purpose |
@@ -39,9 +36,8 @@ vulchain/
 | `seed_prompts_pkg_1000.jsonl` | 1,000 package-hallucination search seeds |
 | `seed_prompts_url_1000.jsonl` | 1,000 insecure-URL search seeds |
 | `vulchain_all_250_anonymized.csv` | Metadata for the 250-model evaluation corpus |
-| `phishtank.csv` | PhishTank snapshot used by the insecure-URL verifier |
-| `urlhaus.csv` | URLhaus snapshot used by the insecure-URL verifier |
-| `tranco-1M.csv` | Tranco top-domain snapshot used to derive the benign-domain allowlist |
+
+The insecure-URL verifier additionally consumes a PhishTank snapshot, a URLhaus snapshot, and a Tranco-derived benign-domain allowlist. These are **external, user-supplied inputs, not shipped in this repository** — see Section 5 for how to obtain and point VulChain at them via `--phishtank`, `--urlhaus`, and `--benign_domains`.
 
 Model weights are **not stored in this repository**. The model-list CSV contains public model identifiers together with anonymized relative local paths.
 
@@ -96,6 +92,19 @@ Base checkpoint:
 ```
 
 The legacy model-list schema (`model_id,base_model,adaptation_type,base_family`) is also accepted.
+
+> **Selection-pipeline reproducibility note.** `vulchain_all_250_anonymized.csv`
+> is the final, released 250-model list and is what `vulchain.py` consumes
+> directly — reviewers do not need to regenerate it to run the artifact. The
+> repository's model-selection utilities (candidate-list auditing and a
+> secondary deep-verification pass over Hugging Face metadata) narrow a much
+> larger candidate pool down toward the target of 25 full fine-tuned, 20
+> adapter, and 5 quantized derivatives per base family, but on their own they
+> do not automatically reach exactly 250 verified candidates. Final curation
+> to the released 250-model list included an additional manual verification
+> and reconciliation step beyond what the selection scripts perform
+> automatically. This does not affect reproducing the paper's results with
+> `vulchain_all_250_anonymized.csv` as shipped.
 
 ---
 
@@ -182,13 +191,15 @@ Depending on the installed environment, dependency-level deprecation warnings fr
 
 ## 5. Preparing Insecure-URL Verification Data
 
-The repository includes:
+The insecure-URL detector consumes three external threat-intelligence/allowlist sources that are **not included in this repository** and must be supplied by the reviewer:
 
 ```text
-phishtank.csv
-urlhaus.csv
-tranco-1M.csv
+a PhishTank verified-URL CSV snapshot
+a URLhaus CSV snapshot
+a Tranco top-1M domain-ranking CSV
 ```
+
+Place downloaded snapshots wherever convenient, e.g. under `./cache/`, and pass their paths via `--phishtank`, `--urlhaus`, and (after deriving the benign-domain list below) `--benign_domains`.
 
 The insecure-URL detector expects a benign-domain file containing **one domain per line**.
 
@@ -198,7 +209,7 @@ Create the cache directory:
 mkdir -p cache
 ```
 
-Generate the benign-domain list from Tranco:
+Generate the benign-domain list from a downloaded Tranco snapshot (assumed here as `tranco-1M.csv`):
 
 ```bash
 cut -d',' -f2 tranco-1M.csv \
@@ -219,8 +230,6 @@ cache/
 ├── known_benign_domains.txt
 └── dns_cache.json
 ```
-
-The PhishTank and URLhaus snapshots can be used directly from the repository root.
 
 ### Insecure-URL Verifier
 
@@ -320,8 +329,8 @@ python vulchain.py \
   --model /path/to/derived/model \
   --base_model /path/to/base/model \
   --output_dir ./results/url_run_001 \
-  --phishtank ./phishtank.csv \
-  --urlhaus ./urlhaus.csv \
+  --phishtank ./cache/phishtank_verified.csv \
+  --urlhaus ./cache/urlhaus_online.csv \
   --benign_domains ./cache/known_benign_domains.txt \
   --dns_cache ./cache/dns_cache.json
 ```
@@ -373,8 +382,8 @@ python vulchain.py \
   --prompt_bank seed_prompts_url_1000.jsonl \
   --model_list vulchain_all_250_anonymized.csv \
   --output_dir ./audit/url \
-  --phishtank ./phishtank.csv \
-  --urlhaus ./urlhaus.csv \
+  --phishtank ./cache/phishtank_verified.csv \
+  --urlhaus ./cache/urlhaus_online.csv \
   --benign_domains ./cache/known_benign_domains.txt \
   --dns_cache ./cache/dns_cache.json \
   --no_8bit
@@ -523,6 +532,20 @@ vulnerability classes unless otherwise stated.
 | Bandit temperature ($\tau$) | `--policy_temp` | 0.5 |
 | Minimum probability floor ($\epsilon$) | `--policy_floor` | 0.05 |
 | Sliding reward window | internal | 50 |
+| Per-model query budget ($B_{\text{model}}$, audit mode) | `--per_model_budget` | 1,200 |
+
+> **Note on `--per_model_budget`.** The paper's per-*prompt* query budget is
+> $B_{\text{prompt}} = T(C+1)R = 1{,}200$ forward passes (Eq. 8) — the cost of
+> exhausting search on a single seed. The CLI's `--per_model_budget` default is
+> also 1,200, i.e. numerically identical to $B_{\text{prompt}}$. Because audit
+> mode stops trying further seeds on a model once cumulative queries reach
+> `--per_model_budget`, the current default effectively allows only about
+> **one seed prompt per model** before moving on, rather than exhausting a
+> meaningful portion of the full 1,000-prompt bank per model. If you intend to
+> reproduce full-bank prompt-level coverage per model, pass an explicitly
+> larger `--per_model_budget` (e.g. a multiple of $B_{\text{prompt}}$ sized to
+> the number of seeds you want tried per model) rather than relying on the
+> default.
 
 For each seed prompt, VulChain uses a fixed search horizon of **T = 50** steps. At every step, it evaluates **C = 5** mutated candidates together with one unmodified baseline prompt and samples **R = 4** stochastic responses for each evaluated prompt.
 
@@ -586,7 +609,7 @@ D_v = true
 For experiments using the five primary perturbation families, explicitly run:
 
 ```bash
---categories word,char,structural,encoding,crosslingual
+--categories word,char,context,encoding,crosslingual
 ```
 
 The five primary categories are therefore:
@@ -594,7 +617,7 @@ The five primary categories are therefore:
 ```text
 word
 character
-structural
+context
 encoding
 cross-lingual
 ```
