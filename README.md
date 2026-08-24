@@ -336,23 +336,6 @@ to disable live DNS resolution.
 
 ---
 
-### 6.3 Custom Seed Prompt
-
-Single-model mode uses the selected vulnerability class's built-in default seed unless `--seed_prompt` is supplied.
-
-Example:
-
-```bash
-python vulchain.py \
-  --vuln package_hallucination \
-  --model /path/to/derived/model \
-  --base_model /path/to/base/model \
-  --seed_prompt 'YOUR SEED PROMPT' \
-  --output_dir ./results/custom_seed
-```
-
----
-
 ## 7. Ecosystem Audit Mode
 
 Audit mode runs a **prompt bank × model list** experiment.
@@ -433,20 +416,6 @@ local_path absent
         ↓
 use public Hugging Face model_id
 ```
-
----
-
-### 7.4 Precision Note
-
-The implementation's generic `load_8bit` option can be enabled when bitsandbytes is available.
-
-For experiments where the checkpoint's stored precision should be preserved, use:
-
-```bash
---no_8bit
-```
-
-Format-specific AWQ/GPTQ/compressed-tensors checkpoints are still handled according to their configured quantization format.
 
 ---
 
@@ -612,31 +581,12 @@ D_v = true
 
 ## 12. Mutation Operators
 
-The current implementation registers six operator names:
-
-```text
-word
-char
-context
-encoding
-crosslingual
-compress
-```
-
-They can be selected using:
-
-```bash
---categories word,char,context,encoding,crosslingual,compress
-```
-
-`context` corresponds to the implementation's structural/context-formatting perturbation.
-
-### Paper-Aligned Five-Operator Configuration
+### Five-Operator Configuration
 
 For experiments using the five primary perturbation families, explicitly run:
 
 ```bash
---categories word,char,context,encoding,crosslingual
+--categories word,char,structural,encoding,crosslingual
 ```
 
 The five primary categories are therefore:
@@ -644,7 +594,7 @@ The five primary categories are therefore:
 ```text
 word
 character
-structural/context
+structural
 encoding
 cross-lingual
 ```
@@ -1021,81 +971,7 @@ The release does not include confirmed rediscovered trigger prompts or raw flagg
 
 ---
 
-## 20. Practical Reviewer Workflow
-
-Artifact evaluation can be performed at increasing levels of computational cost.
-
-### Level 1 — No Model Weights
-
-Install the environment:
-
-```bash
-pip install -r requirements.txt
-```
-
-Check the engine:
-
-```bash
-python vulchain.py --list
-```
-
-Then run the 250-model CSV integrity check from Section 16.
-
-This validates:
-
-- environment setup;
-- engine import;
-- vulnerability registration;
-- artifact model-list structure.
-
----
-
-### Level 2 — One-Model Smoke Test
-
-Use one accessible derived model and its corresponding base model:
-
-```bash
-python vulchain.py \
-  --vuln package_hallucination \
-  --model /path/to/derived/model \
-  --base_model /path/to/base/model \
-  --steps 2 \
-  --candidates 2 \
-  --samples 1 \
-  --output_dir ./results/smoke
-```
-
-This exercises the main execution path with substantially lower computational cost than the complete evaluation.
-
----
-
-### Level 3 — Ecosystem Audit
-
-Use one of the released prompt banks together with:
-
-```text
-vulchain_all_250_anonymized.csv
-```
-
-For example:
-
-```bash
-python vulchain.py \
-  --vuln package_hallucination \
-  --prompt_bank seed_prompts_pkg_1000.jsonl \
-  --model_list vulchain_all_250_anonymized.csv \
-  --per_model_budget 1200 \
-  --categories word,char,context,encoding,crosslingual \
-  --output_dir ./audit/package \
-  --live_verify \
-  --no_8bit
-```
-
-A complete 250-model audit is computationally expensive and requires access to the corresponding public checkpoints.
-
----
-
-## 21. Responsible Use
+## 20. Responsible Use
 
 VulChain should be used only for defensive analysis, controlled research, and authorized security auditing.
 
@@ -1113,7 +989,7 @@ VulChain is designed to audit whether **already-known upstream vulnerability beh
 
 ---
 
-## 22. Command Reference
+## 21. Command Reference
 
 Display all CLI options:
 
