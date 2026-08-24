@@ -539,36 +539,51 @@ Model-level and prompt-level ASR remain reproducible under deterministic seed or
 
 ## 10. Search Configuration
 
-The released implementation exposes the following default search parameters:
+## Search Configuration
+
+The released implementation follows the hyperparameter configuration reported
+in the paper. All parameters are fixed across the evaluated derived models and
+vulnerability classes unless otherwise stated.
 
 | Parameter | CLI Flag | Default |
 |---|---|---:|
-| Search steps | `--steps` | 50 |
-| Mutated candidates per step | `--candidates` | 5 |
-| Generations per candidate | `--samples` | 4 |
+| Search steps per prompt \(T\) | `--steps` | 50 |
+| Candidate mutations per step \(C\) | `--candidates` | 5 |
+| Samples per candidate \(R\) | `--samples` | 4 |
+| Per-prompt query budget \(B_{\text{prompt}}\) | derived | 1,200 |
 | Random seed | `--seed` | 42 |
-| Maximum new tokens | `--max_tokens` | 96 |
-| Temperature | `--temperature` | 0.9 |
-| Nucleus sampling | internal | 0.95 |
-| Bandit temperature | `--policy_temp` | 0.5 |
-| Bandit probability floor | `--policy_floor` | 0.05 |
-| Per-model audit budget | `--per_model_budget` | 1200 |
+| Maximum generation length | `--max_tokens` | 96 |
+| Decoding temperature | `--temperature` | 0.9 |
+| Nucleus sampling \(p\) | internal | 0.95 |
+| Bandit temperature \(\tau\) | `--policy_temp` | 0.5 |
+| Minimum probability floor \(\epsilon\) | `--policy_floor` | 0.05 |
+| Sliding reward window | internal | 50 |
 
-The implementation reports the per-prompt query count as:
+For each seed prompt, VulChain uses a fixed search horizon of \(T=50\)
+steps. At every step, it evaluates \(C=5\) mutated candidates together with
+one unmodified baseline prompt and samples \(R=4\) stochastic responses for
+each evaluated prompt.
 
-```text
-B = T × (C + 1) × R
-```
+The resulting **per-prompt forward-pass budget** is:
 
-where:
+\[
+B_{\text{prompt}}
+= T(C+1)R
+= 50 \times (5+1) \times 4
+= 1{,}200.
+\]
 
-```text
-T = number of executed search steps
-C = number of mutated candidates
-R = number of generations per candidate
-```
+The \(C+1\) term accounts for the \(C\) mutated candidate evaluations plus one
+baseline evaluation at each search step.
 
-The `+1` accounts for the baseline candidate evaluated alongside the mutations.
+Thus, \(B_{\text{prompt}}\) is measured in **model forward passes**. It is
+distinct from queries-to-detection (QTD), which is reported in candidate
+evaluations. One candidate evaluation corresponds to evaluating one mutated
+prompt against the target model and internally consumes \(R\) stochastic
+forward passes.
+
+A successful search may terminate before completing all \(T=50\) steps and
+therefore consume fewer than 1,200 forward passes.
 
 ---
 
