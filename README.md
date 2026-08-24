@@ -22,7 +22,7 @@ requirements.txt
 README.md
 seed_prompts_pkg_1000.jsonl    # package-hallucination seed bank
 seed_prompts_url_1000.jsonl    # insecure-URL seed bank
-derived_models.template.csv    # model-list schema (fill with HF identifiers)
+vulchain_all_250_anonymized.csv    # model-list schema (fill with HF identifiers)
 ```
 
 All engine code is in the single file `vulchain.py`; the rest are data/artifact
