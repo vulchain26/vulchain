@@ -557,31 +557,19 @@ vulnerability classes unless otherwise stated.
 | Minimum probability floor \(\epsilon\) | `--policy_floor` | 0.05 |
 | Sliding reward window | internal | 50 |
 
-For each seed prompt, VulChain uses a fixed search horizon of \(T=50\)
-steps. At every step, it evaluates \(C=5\) mutated candidates together with
-one unmodified baseline prompt and samples \(R=4\) stochastic responses for
-each evaluated prompt.
+For each seed prompt, VulChain uses a fixed search horizon of **T = 50** steps. At every step, it evaluates **C = 5** mutated candidates together with one unmodified baseline prompt and samples **R = 4** stochastic responses for each evaluated prompt.
 
 The resulting **per-prompt forward-pass budget** is:
 
-\[
-B_{\text{prompt}}
-= T(C+1)R
-= 50 \times (5+1) \times 4
-= 1{,}200.
-\]
+$$
+B_{\text{prompt}} = T(C+1)R = 50 \times (5+1) \times 4 = 1{,}200.
+$$
 
-The \(C+1\) term accounts for the \(C\) mutated candidate evaluations plus one
-baseline evaluation at each search step.
+The **C + 1** term accounts for the **C** mutated candidate evaluations plus one baseline evaluation at each search step.
 
-Thus, \(B_{\text{prompt}}\) is measured in **model forward passes**. It is
-distinct from queries-to-detection (QTD), which is reported in candidate
-evaluations. One candidate evaluation corresponds to evaluating one mutated
-prompt against the target model and internally consumes \(R\) stochastic
-forward passes.
+Thus, $B_{\text{prompt}}$ is measured in **model forward passes**. It is distinct from **queries-to-detection (QTD)**, which is reported in candidate evaluations. One candidate evaluation corresponds to evaluating one mutated prompt against the target model and internally consumes **R** stochastic forward passes.
 
-A successful search may terminate before completing all \(T=50\) steps and
-therefore consume fewer than 1,200 forward passes.
+A successful search may terminate before completing all **T = 50** steps and therefore consume fewer than **1,200 forward passes**.
 
 ---
 
