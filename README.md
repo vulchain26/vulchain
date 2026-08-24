@@ -996,53 +996,13 @@ The release does not include confirmed rediscovered trigger prompts or raw flagg
 
 ---
 
-## 20. Responsible Use
-
-VulChain should be used only for defensive analysis, controlled research, and authorized security auditing.
-
-In particular:
-
-- do not install generated package names;
-- do not register generated domains;
-- do not navigate to generated suspicious URLs;
-- do not execute generated artifacts;
-- do not treat a dense search score as a confirmed vulnerability;
-- use the strict detector output for vulnerability confirmation;
-- preserve appropriate disclosure handling for confirmed trigger prompts and flagged artifacts.
-
-VulChain is designed to audit whether **already-known upstream vulnerability behavior remains reachable after model adaptation**. It is not intended as a general-purpose vulnerability discovery or exploitation framework.
-
----
-
-## 21. Command Reference
-
-Display all CLI options:
-
-```bash
-python vulchain.py --help
-```
-
-List registered vulnerability classes:
-
-```bash
-python vulchain.py --list
-```
-
-The source of truth for supported CLI flags and runtime behavior is:
-
-```text
-vulchain.py
-```
-
----
-
 ## 22. Matched Cross-Family Control Analysis (Appendix E)
 
 `build_matched_cross_family_controls.py` reproduces the model-selection half of the paper's matched cross-family control comparison (Table 9, Eq. 9): it builds the matched, non-derived control model list against which model-level ASR on the true 250-model corpus is compared, to estimate the background rate at which comparable models exhibit each vulnerability class.
 
 This is metadata-only tooling: it queries Hugging Face Hub model metadata (`config.json`, safetensors index, model-card tags) to select and characterize control models, and never downloads or loads model weights. It sits upstream of `vulchain.py`'s existing audit mode rather than duplicating its search/scoring/detection logic — once the control list is built, `vulchain.py --model_list` handles the actual probing.
 
-### 22.1 Step 1 — Build the Matched Control List
+### 20.1 Step 1 — Build the Matched Control List
 
 ```bash
 python build_matched_cross_family_controls.py \
@@ -1072,7 +1032,7 @@ unmatched_derivatives.csv      derivatives with no eligible control, even after 
 
 > **Methodology caveat.** The paper does not specify exact bin edges for "parameter-size bin" or a fixed vocabulary for "task specialization"/"instruction status." This script defines both precisely and deterministically (fixed parameter-count bin edges; exact tag-set membership checked against Hugging Face's structured `tags`/`pipeline_tag`/`config.json` fields, with id-text regex only as a documented fallback) — see the `PARAM_SIZE_BIN_EDGES_B`, `TASK_TAGS`, and `INSTRUCT_TAGS` definitions near the top of the script. Review these against your own methodology notes before treating a run as paper-reproducing.
 
-### 22.2 Step 2 — Audit Both Lists with `vulchain.py`
+### 20.2 Step 2 — Audit Both Lists with `vulchain.py`
 
 Run the existing ecosystem-audit mode twice, once per list, with identical settings:
 
@@ -1090,7 +1050,7 @@ python vulchain.py --vuln package_hallucination \
 
 Repeat with `--vuln insecure_url` and its corresponding prompt bank/verification flags (Section 7.2) for the insecure-URL comparison.
 
-### 22.3 Step 3 — Compute the ΔASR Table
+### 20.3 Step 3 — Compute the ΔASR Table
 
 Each run's `audit_summary.json` already reports `model_level_asr` overall and per family under `by_family` (Section 15). Table 9's ΔASR per family is simply:
 
@@ -1101,3 +1061,47 @@ Each run's `audit_summary.json` already reports `model_level_asr` overall and pe
 computed directly from the two `audit_summary.json` files — no additional script is needed. `control_mapping.csv` (from Step 1) lets you re-map each matched control back to the base family of the derivative it stands in for, since the control list itself is written with `base_family=cross_family_control`.
 
 > **Disclosure note.** Per the paper's Open Science statement (Appendix A), the matching procedure and aggregate (family-level) metadata are appropriate for public release, but per-model vulnerability labels for individual non-derived control models should **not** be published — treat any raw per-model rows in the control-side `audit_ledger.csv` / `audit_summary.json` the same way as confirmed trigger prompts and flagged artifacts elsewhere in this README (Section 19), and share them only through controlled/coordinated-disclosure channels.
+
+---
+
+## 21. Responsible Use
+
+VulChain should be used only for defensive analysis, controlled research, and authorized security auditing.
+
+In particular:
+
+- do not install generated package names;
+- do not register generated domains;
+- do not navigate to generated suspicious URLs;
+- do not execute generated artifacts;
+- do not treat a dense search score as a confirmed vulnerability;
+- use the strict detector output for vulnerability confirmation;
+- preserve appropriate disclosure handling for confirmed trigger prompts and flagged artifacts.
+
+VulChain is designed to audit whether **already-known upstream vulnerability behavior remains reachable after model adaptation**. It is not intended as a general-purpose vulnerability discovery or exploitation framework.
+
+---
+
+## 22. Command Reference
+
+Display all CLI options:
+
+```bash
+python vulchain.py --help
+```
+
+List registered vulnerability classes:
+
+```bash
+python vulchain.py --list
+```
+
+The source of truth for supported CLI flags and runtime behavior is:
+
+```text
+vulchain.py
+```
+
+
+
+
