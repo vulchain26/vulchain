@@ -22,6 +22,12 @@ Two production plugins are provided (package hallucination, insecure URL) plus
 two template stubs (insecure code via static analysis, PII / secret leakage via
 canary matching) showing how to add a new class without touching the engine.
 
+Artifact compatibility note:
+  Ecosystem audit mode accepts the released anonymized model-list schema
+  (model_id, local_path, base_family, base_hf_id, adaptation_type, has_weights).
+  Local paths are preferred when present; otherwise Hugging Face IDs are used.
+  This compatibility layer does not alter mutation, scoring, detection, or bandit logic.
+
 --------------------------------------------------------------------------------
 USAGE
 --------------------------------------------------------------------------------
@@ -77,7 +83,7 @@ from urllib.parse import urlparse
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 
 # --- Optional dependencies (all guarded; the engine degrades gracefully) ------
 try:
@@ -1145,16 +1151,51 @@ def _expand(p: str) -> str:
 
 
 def looks_like_peft_adapter(model_path: str) -> bool:
+    """Fast local adapter check used by single-model mode.
+
+    Audit mode can additionally force adapter loading from the model-list
+    adaptation_type field, which makes remote Hugging Face adapter IDs usable
+    without changing the search or detector logic.
+    """
     e = _expand(model_path)
     return os.path.isdir(e) and os.path.exists(os.path.join(e, "adapter_config.json"))
 
 
-def load_model(model_path: str, base_model: str, load_8bit: bool = True):
+def _read_quant_method(path: str) -> str:
+    """Read quantization metadata from a local directory or a Hub model ID."""
+    if not path:
+        return ""
+    try:
+        if os.path.isdir(path):
+            with open(os.path.join(path, "config.json"), encoding="utf-8") as f:
+                qc = (json.load(f).get("quantization_config") or {})
+        else:
+            cfg = AutoConfig.from_pretrained(path, trust_remote_code=True)
+            qc = getattr(cfg, "quantization_config", None) or {}
+            if hasattr(qc, "to_dict"):
+                qc = qc.to_dict()
+        return str(qc.get("quant_method", "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def load_model(model_path: str, base_model: str, load_8bit: bool = True,
+               force_adapter: Optional[bool] = None):
+    """Load a full/quantized model or a PEFT adapter.
+
+    `force_adapter` is a compatibility-only hint used by ecosystem audit mode
+    when the released model list says adaptation_type=adapter.  If omitted,
+    the original local `adapter_config.json` detection is preserved.
+    """
     model_path = _expand(model_path) if model_path else model_path
     base_model = _expand(base_model) if base_model else base_model
 
-    is_adapter = bool(model_path and model_path != base_model and HAS_PEFT
-                      and looks_like_peft_adapter(model_path))
+    detected_adapter = bool(model_path and model_path != base_model
+                            and looks_like_peft_adapter(model_path))
+    is_adapter = detected_adapter if force_adapter is None else bool(force_adapter)
+    if is_adapter and not HAS_PEFT:
+        raise RuntimeError("PEFT adapter loading requires the `peft` package")
+
     print(f"[INFO] base={base_model}  model={model_path}  adapter={is_adapter}  8bit={load_8bit}")
 
     tok_source = base_model if is_adapter else (model_path or base_model)
@@ -1163,12 +1204,7 @@ def load_model(model_path: str, base_model: str, load_8bit: bool = True):
         tokenizer.pad_token = tokenizer.eos_token
 
     def _load_causal_lm(path: str):
-        quant_method = ""
-        try:
-            with open(os.path.join(path, "config.json")) as _f:
-                quant_method = (json.load(_f).get("quantization_config") or {}).get("quant_method", "")
-        except Exception:
-            pass
+        quant_method = _read_quant_method(path)
         common = dict(device_map="auto", trust_remote_code=True, ignore_mismatched_sizes=True)
         if quant_method == "awq":
             if not HAS_AWQ:
@@ -1900,19 +1936,54 @@ class PromptBank:
 @dataclass
 class DerivedModel:
     model_id: str
-    base_model: str
+    base_model: str = ""
     adaptation_type: str = ""
     base_family: str = ""
+    local_path: str = ""
+    base_hf_id: str = ""
+    has_weights: Optional[bool] = None
     meta: Dict = field(default_factory=dict)
+
+    def model_ref(self) -> str:
+        """Prefer an available anonymized local path, else the Hub model ID."""
+        p = _expand(self.local_path) if self.local_path else ""
+        return p if p and os.path.isdir(p) else self.model_id
+
+    def base_ref(self, default_base_model: str = "") -> str:
+        """Resolve a row-specific base before falling back to the CLI default."""
+        return self.base_model or self.base_hf_id or default_base_model
+
+    def is_adapter(self) -> bool:
+        t = self.adaptation_type.strip().lower().replace("-", "_")
+        return t in {"adapter", "lora", "qlora", "peft", "adapter_based"}
+
+
+def _parse_optional_bool(value) -> Optional[bool]:
+    if value is None or str(value).strip() == "":
+        return None
+    v = str(value).strip().lower()
+    if v in {"1", "true", "yes", "y"}:
+        return True
+    if v in {"0", "false", "no", "n"}:
+        return False
+    return None
 
 
 def load_model_list(path: str) -> List[DerivedModel]:
     """
-    Load the derived-model list. Accepts CSV or JSONL. Recognized columns
-    (case-insensitive), all optional except model_id + base_model:
+    Load a derived-model list from CSV or JSONL.
+
+    Native/released schema (case-insensitive):
+        model_id, local_path, base_family, base_hf_id, adaptation_type, has_weights
+
+    Legacy schema remains supported:
         model_id, base_model, adaptation_type, base_family
-    Any other columns are preserved as meta. If base_model is absent, the CLI
-    --base_model value is used as a fallback for every row.
+
+    Resolution is intentionally compatibility-only:
+      * derived model: existing local_path -> otherwise model_id (Hub ID/path)
+      * base model: row base_model -> row base_hf_id -> CLI --base_model fallback
+
+    Unknown columns are preserved as metadata.
     """
     models: List[DerivedModel] = []
     is_jsonl = path.lower().endswith((".jsonl", ".ndjson"))
@@ -1923,24 +1994,48 @@ def load_model_list(path: str) -> List[DerivedModel]:
         with open(path, "r", encoding="utf-8", newline="") as f:
             rows = list(csv.DictReader(f))
 
+    list_dir = Path(path).expanduser().resolve().parent
+
     def _get(row, *names):
-        for n in names:
-            for k in row:
-                if k and k.lower() == n:
-                    return row[k]
+        names = {n.lower() for n in names}
+        for k, v in row.items():
+            if k and k.lower() in names:
+                return v
         return None
 
-    known = {"model_id", "base_model", "adaptation_type", "base_family"}
+    def _local_candidate(raw: str) -> str:
+        raw = str(raw or "").strip()
+        if not raw:
+            return ""
+        p = Path(raw).expanduser()
+        if p.is_absolute():
+            return str(p)
+        # Prefer paths relative to the model-list file; retain the released
+        # relative string when the checkout does not contain model weights.
+        candidate = (list_dir / p).resolve()
+        return str(candidate) if candidate.exists() else raw
+
+    known = {
+        "model_id", "hf_id", "id", "model",
+        "local_path", "model_path",
+        "base_model", "base", "base_id", "base_hf_id",
+        "adaptation_type", "adaptation", "type",
+        "base_family", "family", "has_weights",
+    }
     for row in rows:
         mid = _get(row, "model_id", "hf_id", "id", "model")
         if not mid:
             continue
-        base = _get(row, "base_model", "base", "base_id") or ""
+        base_model = _local_candidate(_get(row, "base_model", "base", "base_id") or "")
+        local_path = _local_candidate(_get(row, "local_path", "model_path") or "")
         models.append(DerivedModel(
             model_id=str(mid).strip(),
-            base_model=str(base).strip(),
+            base_model=base_model,
             adaptation_type=str(_get(row, "adaptation_type", "adaptation", "type") or "").strip(),
             base_family=str(_get(row, "base_family", "family") or "").strip(),
+            local_path=local_path,
+            base_hf_id=str(_get(row, "base_hf_id") or "").strip(),
+            has_weights=_parse_optional_bool(_get(row, "has_weights")),
             meta={k: v for k, v in row.items() if k and k.lower() not in known},
         ))
     if not models:
@@ -2020,16 +2115,20 @@ def run_audit(models: List[DerivedModel], bank: PromptBank, vuln_factory: Callab
 
     per_model_rows = []
     for mi, dm in enumerate(models, 1):
-        base = dm.base_model or default_base_model
+        base = dm.base_ref(default_base_model)
         if not base:
-            print(f"[AUDIT] SKIP {dm.model_id}: no base_model and no default provided")
+            print(f"[AUDIT] SKIP {dm.model_id}: no row base_model/base_hf_id and no CLI fallback")
             continue
+        model_ref = dm.model_ref()
         safe = _safe_name(dm.model_id)
         print(f"\n[AUDIT] ({mi}/{len(models)}) {dm.model_id} "
               f"[{dm.base_family or '?'} / {dm.adaptation_type or '?'}]")
+        if dm.local_path and model_ref == dm.model_id:
+            print(f"[AUDIT]   local_path unavailable -> using model_id: {dm.model_id}")
 
         try:
-            model, tokenizer = load_model(dm.model_id, base, load_8bit)
+            model, tokenizer = load_model(
+                model_ref, base, load_8bit, force_adapter=dm.is_adapter())
         except Exception as e:
             print(f"[AUDIT] LOAD FAILED {dm.model_id}: {e}")
             per_model_rows.append({"model_id": dm.model_id, "base_family": dm.base_family,
@@ -2227,7 +2326,7 @@ def main():
     parser.add_argument("--prompt_bank", default=None,
                         help="Seed-prompt bank (.jsonl). Requires seed_id + prompt fields.")
     parser.add_argument("--model_list", default=None,
-                        help="Derived-model list (.csv or .jsonl): model_id[,base_model,...]")
+                        help="Derived-model list (.csv/.jsonl): released schema or legacy model_id[,base_model,...]")
     parser.add_argument("--per_model_budget", type=int, default=1200,
                         help="Total forward-pass budget B per model (audit mode)")
     parser.add_argument("--upstream_model", default=None,
